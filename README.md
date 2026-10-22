@@ -20,17 +20,21 @@ holding the port on your laptop.
    ```bash
    paseo plugin install /path/to/paseo-port-forward
    ```
-2. In Settings → Plugins → **Remote ports**, enter each remote host's SSH target:
-   `user@host` or a `~/.ssh/config` alias. **Test connection** checks that the machine you
-   reach is that Paseo host.
+2. Nothing to configure if `ssh <host name in Paseo>` or an alias in `~/.ssh/config`
+   reaches the remote: the plugin tries them and keeps the one whose Paseo host matches.
+   Otherwise set its SSH target (`user@host` or an alias) in Settings → Plugins →
+   **Remote ports**, where **Test connection** checks it.
 3. Start a workspace's dev servers on the remote (its ▷ service, or a command in a Paseo
-   terminal). Click the **Remote ports** icon in the sidebar: a popover opens over the
-   current workspace. Press **Forward** on the workspace, then **Open** on a port.
+   terminal). Its ports open on this machine by themselves. Click the **Remote ports** icon
+   in the sidebar (it shows how many are forwarded): a popover opens over the current
+   workspace. **Open** a port in Chrome, or **Stop** a workspace to free its ports.
 
 Nothing is installed on the remote, and the project repo needs no changes.
 
 Settings → Plugins → **Remote ports**:
-- **SSH targets**, each with **Test connection**.
+- **SSH targets** (optional, found automatically), each with **Test connection**.
+- **Forward automatically:** default on. Off, a workspace forwards only after **Forward**.
+- **Open links in:** Google Chrome (default) or the default browser.
 - **Ignored ports:** default `22`.
 - **Scan interval:** default 3 s.
 - **Open link paths:** `label=/path` pairs added to Open links, such as
@@ -38,6 +42,8 @@ Settings → Plugins → **Remote ports**:
 
 ## How it works
 
+- **SSH target:** the one in settings; else the host's name in Paseo or a `~/.ssh/config`
+  alias, tried in parallel, whichever reaches a machine with that Paseo serverId.
 - **Connection:** one OpenSSH ControlMaster per remote host, with your keys, agent and
   `~/.ssh/config`, and `BatchMode=yes`.
 - **Detection:** a read-only script over that connection reads `/proc/net/tcp{,6}` and
@@ -52,9 +58,14 @@ Settings → Plugins → **Remote ports**:
 - **Grouping:** the popover lists the remote host's workspaces through Paseo, each with its
   project, branch and ports. Each port belongs to the workspace whose directory contains
   its process's working directory.
-- **Following:** **Forward** on a workspace forwards its ports now, and the ones that open
-  later. Ports that close lose their forward. **Stop** cancels them all. A workspace that
-  is archived is dropped.
+- **Following:** every workspace with a listening port is followed automatically (or after
+  **Forward**, with that setting off): its ports are forwarded now, and the ones that open
+  later. Ports that close lose their forward. **Stop** cancels them all and keeps that
+  workspace stopped until **Forward**. A workspace that is archived is dropped. Two
+  workspaces on the same port can't both have it: the first one keeps it, the other shows
+  the port as in use.
+- **Background:** the sidebar item polls each online remote host every 5 s, so forwarding
+  runs with the popover closed.
 - **Labels:** the running Paseo service or script on that port; else the app folder
   (`apps/storefront` → `storefront`); else the process name. Each port also shows its
   kind, its folder in the workspace and a short form of its command.

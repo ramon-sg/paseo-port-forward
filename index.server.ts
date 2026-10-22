@@ -7,6 +7,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   followRpc,
   forwardRpc,
+  openUrlRpc,
   pingRpc,
   stateRpc,
   testConnectionRpc,
@@ -15,28 +16,36 @@ import {
 } from "./shared/contracts";
 import { portSettings } from "./shared/settings";
 import { PortManager } from "./server/manager";
+import { openUrl } from "./server/open-url";
 import { sweepStaleSockets } from "./server/ssh";
 
 export default function contribute(server: PluginServerContext) {
   const manager = new PortManager();
   const settings = server.registerSettings(portSettings);
 
+  let browser: "chrome" | "default" = "chrome";
   const load = async () => {
     const state = await settings.read();
-    if (state.status === "ready") manager.applySettings(state.values);
+    if (state.status === "ready") {
+      manager.applySettings(state.values);
+      browser = state.values.browser;
+    }
     else console.warn(`[remote-ports] settings are invalid: ${state.error}`);
   };
   const ready = sweepStaleSockets()
     .catch((error: unknown) => console.warn("[remote-ports] stale socket sweep failed", error))
     .then(load);
   const unsubscribe = settings.subscribe((state) => {
-    if (state.status === "ready") manager.applySettings(state.values);
+    if (state.status === "ready") {
+      manager.applySettings(state.values);
+      browser = state.values.browser;
+    }
   });
 
   server.handle(pingRpc, () => ({ pong: true as const, pid: process.pid, platform: process.platform }));
-  server.handle(stateRpc, async ({ serverId, workspaces }) => {
+  server.handle(stateRpc, async ({ serverId, workspaces, label }) => {
     await ready;
-    return manager.state(serverId, workspaces);
+    return manager.state(serverId, workspaces, label);
   });
   server.handle(followRpc, async ({ serverId, workspaceId }) => {
     await ready;
@@ -54,9 +63,14 @@ export default function contribute(server: PluginServerContext) {
     await ready;
     return { ok: await manager.unforward(serverId, remotePort) };
   });
-  server.handle(testConnectionRpc, async ({ serverId, target }) => {
+  server.handle(testConnectionRpc, async ({ serverId, target, label }) => {
     await ready;
-    return manager.testConnection(serverId, target);
+    return manager.testConnection(serverId, target, label);
+  });
+
+  server.handle(openUrlRpc, async ({ url }) => {
+    await ready;
+    return { opened: await openUrl(url, browser) };
   });
 
   // The plugin process can die without running cleanup; never leave ssh masters behind.

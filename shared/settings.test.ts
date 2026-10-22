@@ -8,6 +8,8 @@ describe("PortSettingsSchema", () => {
       targets: {},
       pollSeconds: 3,
       ignorePorts: [22],
+      autoForward: true,
+      browser: "chrome",
       linkPaths: {},
     });
   });

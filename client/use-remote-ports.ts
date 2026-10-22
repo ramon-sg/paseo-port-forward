@@ -8,7 +8,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { followRpc, forwardRpc, stateRpc, unfollowRpc, unforwardRpc } from "../shared/contracts";
 import type { ScriptInfo } from "./labels";
 
-const POLL_MS = 2_000;
+/** While the popover is open. */
+export const POLL_MS = 2_000;
+/** In the background, from the sidebar, so automatic forwarding runs with the popover closed. */
+export const BACKGROUND_POLL_MS = 5_000;
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 20;
 
@@ -57,7 +60,7 @@ export type PortAction =
   | { kind: "follow" | "unfollow"; workspaceId: string }
   | { kind: "port"; port: number; on: boolean };
 
-export function useRemotePorts(serverId: string) {
+export function useRemotePorts(serverId: string, label: string, pollMs = POLL_MS) {
   const loadState = useRpc(stateRpc);
   const follow = useRpc(followRpc);
   const unfollow = useRpc(unfollowRpc);
@@ -68,7 +71,7 @@ export function useRemotePorts(serverId: string) {
   const workspacesQuery = useQuery({
     queryKey: ["remote-workspaces", serverId],
     queryFn: () => listRemoteWorkspaces(serverId),
-    refetchInterval: POLL_MS,
+    refetchInterval: pollMs,
   });
   const workspaces = workspacesQuery.data;
   const stateKey = ["remote-ports", serverId];
@@ -78,9 +81,10 @@ export function useRemotePorts(serverId: string) {
     queryFn: () =>
       loadState({
         serverId,
+        label,
         workspaces: (workspaces ?? []).map((workspace) => ({ id: workspace.id, directory: workspace.directory })),
       }),
-    refetchInterval: POLL_MS,
+    refetchInterval: pollMs,
   });
   const action = useMutation({
     mutationFn: async (input: PortAction) => {

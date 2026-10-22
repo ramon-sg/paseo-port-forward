@@ -51,3 +51,41 @@ export function groupPorts(workspaces: readonly RemoteWorkspace[], state: PortsS
     activeCount: state.forwards.filter((item) => item.status === "active").length,
   };
 }
+
+function matches(query: string, fields: readonly (string | null | undefined)[]): boolean {
+  return fields.some((field) => field?.toLowerCase().includes(query));
+}
+
+function portFields(entry: PortEntry): (string | null)[] {
+  return [
+    entry.description.name,
+    entry.description.folder,
+    String(entry.row.port),
+    entry.row.process,
+    entry.row.command,
+  ];
+}
+
+/**
+ * Keeps what matches every word of the query. A workspace that matches by itself (title,
+ * project, branch) keeps all its ports; otherwise only its matching ports are kept.
+ */
+export function filterGroups(groups: PortGroups, query: string): PortGroups {
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return groups;
+  const entryMatches = (entry: PortEntry, extra: (string | null)[]) =>
+    words.every((word) => matches(word, [...portFields(entry), ...extra]));
+
+  const workspaces = groups.workspaces.flatMap((group) => {
+    const { title, project, branch } = group.workspace;
+    const own = [title, project, branch];
+    if (words.every((word) => matches(word, own))) return [group];
+    const ports = group.ports.filter((entry) => entryMatches(entry, own));
+    return ports.length > 0 ? [{ ...group, ports }] : [];
+  });
+  return {
+    workspaces,
+    loose: groups.loose.filter((entry) => entryMatches(entry, [])),
+    activeCount: groups.activeCount,
+  };
+}

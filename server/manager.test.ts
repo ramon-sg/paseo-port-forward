@@ -82,12 +82,19 @@ let failStarts: boolean;
 let gate: Promise<void> | null;
 let timeouts: (() => void)[];
 let manager: PortManager;
+let sshConfig: string;
+/** Targets that fail to connect, and the Paseo serverId each other target answers with. */
+let unreachable: Set<string>;
+let serverIdOf: Map<string, string>;
 
 function deps(): ManagerDeps {
   return {
     createSession: (_serverId, target) => {
-      const session = new FakeSession(() => scanOutput(remote, remoteServerId, remoteDocker), target);
-      session.failStart = failStarts;
+      const session = new FakeSession(
+        () => scanOutput(remote, serverIdOf.get(target) ?? remoteServerId, remoteDocker),
+        target,
+      );
+      session.failStart = failStarts || unreachable.has(target);
       sessions.push(session);
       return session;
     },
@@ -95,6 +102,7 @@ function deps(): ManagerDeps {
       if (gate) await gate;
       if (busyPorts.has(port)) throw new LocalPortError(port, "node (pid 7)", `port ${port} is in use on this Mac by node (pid 7)`);
     },
+    readSshConfig: async () => sshConfig,
     log: () => {},
     setInterval: () => 0 as unknown as Timer,
     clearInterval: () => {},
@@ -122,8 +130,11 @@ beforeEach(() => {
   failStarts = false;
   gate = null;
   timeouts = [];
+  sshConfig = "";
+  unreachable = new Set();
+  serverIdOf = new Map();
   manager = new PortManager(deps());
-  manager.applySettings({ targets: { [SERVER]: "devbox" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {} });
+  manager.applySettings({ targets: { [SERVER]: "devbox" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {}, autoForward: false, browser: "chrome" as const });
 });
 
 describe("PortManager", () => {
@@ -224,7 +235,7 @@ describe("PortManager", () => {
 
   it("changing the target connects to the new one and stops the old master", async () => {
     await manager.state(SERVER, [WS]);
-    manager.applySettings({ targets: { [SERVER]: "devbox-2" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {} });
+    manager.applySettings({ targets: { [SERVER]: "devbox-2" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {}, autoForward: false, browser: "chrome" as const });
     await manager.state(SERVER, [WS]);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(sessions.map((session) => session.target)).toEqual(["devbox", "devbox-2"]);
@@ -274,5 +285,108 @@ describe("PortManager", () => {
     await manager.dispose();
     expect(sessions[0]?.cancels.sort()).toEqual([20250, 20251]);
     expect(sessions[0]?.stopped).toBe(true);
+  });
+});
+
+describe("SSH target discovery", () => {
+  const NO_TARGETS = { targets: {}, pollSeconds: 3, ignorePorts: [22], linkPaths: {}, autoForward: false, browser: "chrome" as const };
+
+  beforeEach(() => {
+    manager.applySettings(NO_TARGETS);
+  });
+
+  it("uses the host label when it reaches this Paseo host", async () => {
+    sshConfig = "Host other\n";
+    serverIdOf.set("other", "srv-other");
+    const first = await manager.state(SERVER, [WS], "devbox");
+    expect(first.ssh.state).toBe("discovering");
+    await settle();
+    const state = await manager.state(SERVER, [WS], "devbox");
+    expect(state.ssh).toMatchObject({ target: "devbox", auto: true });
+    expect(state.ports.map((port) => port.port)).toContain(20250);
+  });
+
+  it("falls back to a ~/.ssh/config alias that answers with this serverId", async () => {
+    sshConfig = "Host github.com\nHost wrong\nHost box\n  HostName 10.0.0.2\n";
+    unreachable.add("My Server");
+    unreachable.add("my-server");
+    serverIdOf.set("wrong", "srv-other");
+    await manager.state(SERVER, [WS], "My Server");
+    await settle();
+    const state = await manager.state(SERVER, [WS], "My Server");
+    expect(state.ssh).toMatchObject({ target: "box", auto: true });
+    expect(sessions.some((session) => session.target === "github.com")).toBe(false);
+  });
+
+  it("says how to fix it when nothing matches, and probes leave no session running", async () => {
+    unreachable.add("devbox");
+    await manager.state(SERVER, [WS], "devbox");
+    await settle();
+    const state = await manager.state(SERVER, [WS], "devbox");
+    expect(state.ssh.state).toBe("unmapped");
+    expect(state.ssh.error).toMatch(/Settings/);
+    expect(sessions.every((session) => !session.running)).toBe(true);
+  });
+
+  it("a target in settings wins over discovery", async () => {
+    manager.applySettings({ ...NO_TARGETS, targets: { [SERVER]: "manual" } });
+    const state = await manager.state(SERVER, [WS], "devbox");
+    expect(state.ssh).toMatchObject({ target: "manual", auto: false });
+  });
+
+  it("testConnection without a target discovers one", async () => {
+    const result = await manager.testConnection(SERVER, undefined, "devbox");
+    expect(result).toMatchObject({ ok: true, target: "devbox" });
+  });
+
+  it("testConnection reuses a found target and leaves the live connection alone", async () => {
+    await manager.state(SERVER, [WS], "devbox");
+    await settle();
+    await manager.state(SERVER, [WS], "devbox");
+    const before = sessions.length;
+    const result = await manager.testConnection(SERVER, undefined, "devbox");
+    expect(result).toMatchObject({ ok: true, target: "devbox" });
+    expect(sessions.length).toBe(before + 1);
+    expect((await manager.state(SERVER, [WS], "devbox")).ssh.state).toBe("connected");
+  });
+});
+
+async function settle() {
+  for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
+describe("automatic forwarding", () => {
+  beforeEach(() => {
+    manager.applySettings({
+      targets: { [SERVER]: "devbox" },
+      pollSeconds: 3,
+      ignorePorts: [22],
+      linkPaths: {},
+      autoForward: true,
+      browser: "chrome",
+    });
+  });
+
+  it("forwards a workspace's ports without pressing Forward", async () => {
+    await manager.state(SERVER, [WS]);
+    const state = await manager.state(SERVER, [WS]);
+    expect(forwarded(state)).toEqual([20250]);
+    expect(state.followed).toEqual([WS.id]);
+  });
+
+  it("Stop keeps a workspace stopped until Forward", async () => {
+    await manager.state(SERVER, [WS]);
+    await manager.unfollow(SERVER, WS.id);
+    await manager.tick();
+    let state = await manager.state(SERVER, [WS]);
+    expect(forwarded(state)).toEqual([]);
+    state = await manager.follow(SERVER, WS.id);
+    expect(forwarded(state)).toEqual([20250]);
+  });
+
+  it("ports outside any workspace still wait for a hand forward", async () => {
+    remote = [{ port: 6379, pid: 301, cwd: "/opt/redis" }];
+    const state = await manager.state(SERVER, [WS]);
+    expect(forwarded(state)).toEqual([]);
   });
 });

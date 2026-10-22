@@ -5,12 +5,12 @@
  */
 import type { PluginTheme } from "@getpaseo/plugin";
 import type { PluginPopoverProps } from "@getpaseo/plugin/client";
-import { openExternalUrl, useHosts } from "@getpaseo/plugin/client";
+import { openExternalUrl, useHosts, useRpc } from "@getpaseo/plugin/client";
 import { useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View, useWindowDimensions } from "react-native";
 
-import type { PortsState } from "../shared/contracts";
-import { groupPorts, type PortEntry, type WorkspaceGroup } from "./groups";
+import { openUrlRpc, type PortsState } from "../shared/contracts";
+import { filterGroups, groupPorts, type PortEntry, type WorkspaceGroup } from "./groups";
 import { linkUrl, shortCommand } from "./labels";
 import { makePopoverStyles, type PopoverStyles } from "./popover-styles";
 import { usePortSettings } from "./use-port-settings";
@@ -35,13 +35,13 @@ export interface PortsPopoverProps extends PluginPopoverProps {
 }
 
 export function PortsPopover({ theme, layout, host, close, openSettings }: PortsPopoverProps) {
-  const styles = useMemo(() => makePopoverStyles(theme, layout.compact), [theme, layout.compact]);
+  const { height } = useWindowDimensions();
+  const styles = useMemo(() => makePopoverStyles(theme, layout.compact, height), [theme, layout.compact, height]);
   // This plugin runs on the laptop daemon; every other configured host is a remote.
   const remotes = useHosts().filter((candidate) => candidate.serverId !== host.id);
   const { values } = usePortSettings();
   const [picked, setPicked] = useState<string | null>(null);
-  const configured = remotes.filter((remote) => values?.targets[remote.serverId]);
-  const selected = configured.find((remote) => remote.serverId === picked) ?? configured[0] ?? null;
+  const selected = remotes.find((remote) => remote.serverId === picked) ?? remotes[0] ?? null;
   const goToSettings = () => {
     close();
     openSettings();
@@ -54,9 +54,9 @@ export function PortsPopover({ theme, layout, host, close, openSettings }: Ports
         <View style={styles.spacer} />
         <SmallButton styles={styles} label="Settings" onPress={goToSettings} />
       </View>
-      {configured.length > 1 ? (
+      {remotes.length > 1 ? (
         <View style={styles.chips}>
-          {configured.map((remote) => {
+          {remotes.map((remote) => {
             const active = remote.serverId === selected?.serverId;
             return (
               <Pressable
@@ -76,13 +76,9 @@ export function PortsPopover({ theme, layout, host, close, openSettings }: Ports
       ) : !selected ? (
         <Notice
           styles={styles}
-          title={remotes.length === 0 ? "No remote hosts" : "No SSH target yet"}
-          body={
-            remotes.length === 0
-              ? "Add a remote Paseo host in the app first."
-              : "Set the SSH target of a remote host in Settings to see and forward its ports."
-          }
-          action={remotes.length === 0 ? null : { label: "Open settings", onPress: goToSettings }}
+          title="No remote hosts"
+          body="Add a remote Paseo host in the app first."
+          action={null}
         />
       ) : selected.status !== "online" ? (
         <Notice
@@ -99,6 +95,8 @@ export function PortsPopover({ theme, layout, host, close, openSettings }: Ports
           linkPaths={values.linkPaths}
           styles={styles}
           theme={theme}
+          openSettings={goToSettings}
+          searchFocus={!layout.compact}
         />
       )}
     </View>
@@ -111,10 +109,14 @@ interface HostPortsProps {
   linkPaths: Record<string, string>;
   styles: PopoverStyles;
   theme: PluginTheme;
+  openSettings(): void;
+  /** Focus the search box on open (desktop only, so phones don't pop the keyboard). */
+  searchFocus: boolean;
 }
 
-function HostPorts({ serverId, label, linkPaths, styles, theme }: HostPortsProps) {
-  const { workspaces, state, loadError, action } = useRemotePorts(serverId);
+function HostPorts({ serverId, label, linkPaths, styles, theme, openSettings, searchFocus }: HostPortsProps) {
+  const { workspaces, state, loadError, action } = useRemotePorts(serverId, label);
+  const [query, setQuery] = useState("");
 
   if (!state || !workspaces) {
     return (
@@ -128,15 +130,54 @@ function HostPorts({ serverId, label, linkPaths, styles, theme }: HostPortsProps
     );
   }
 
-  const groups = groupPorts(workspaces, state);
+  if (state.ssh.state === "discovering" || (state.ssh.state === "unmapped" && !state.ssh.target)) {
+    const finding = state.ssh.state === "discovering" || !state.ssh.error;
+    return finding ? (
+      <View style={[styles.row, styles.centered]}>
+        <ActivityIndicator color={theme.colors.foregroundMuted} />
+        <Text style={styles.meta}>Finding the SSH connection to {label}…</Text>
+      </View>
+    ) : (
+      <Notice
+        styles={styles}
+        title={`Can't reach ${label} over SSH`}
+        body={`Tried "${label}" and the hosts in ~/.ssh/config. Add an alias for it there, or set its SSH target in Settings.`}
+        action={{ label: "Open settings", onPress: openSettings }}
+      />
+    );
+  }
+
+  const all = groupPorts(workspaces, state);
+  const groups = filterGroups(all, query);
   const busy = action.isPending;
   const run = (input: PortAction) => action.mutate(input);
-  const empty = groups.workspaces.length === 0 && groups.loose.length === 0;
+  const empty = all.workspaces.length === 0 && all.loose.length === 0;
+  const noMatch = !empty && groups.workspaces.length === 0 && groups.loose.length === 0;
+  const portCount = all.workspaces.reduce((sum, group) => sum + group.ports.length, 0) + all.loose.length;
 
   return (
     <>
       <SshLine label={label} state={state} activeCount={groups.activeCount} styles={styles} theme={theme} />
       {action.error ? <Text style={styles.danger}>{String(action.error)}</Text> : null}
+      {!empty ? (
+        <View style={styles.searchRow}>
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Filter by worktree, branch, service or port"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            autoFocus={searchFocus}
+            autoCorrect={false}
+            autoCapitalize="none"
+            style={styles.search}
+          />
+          {query ? <SmallButton styles={styles} label="Clear" onPress={() => setQuery("")} /> : null}
+          <Text style={styles.meta}>
+            {all.workspaces.length} {all.workspaces.length === 1 ? "worktree" : "worktrees"} · {portCount}{" "}
+            {portCount === 1 ? "port" : "ports"}
+          </Text>
+        </View>
+      ) : null}
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
         {empty && !state.scanError ? (
           <Notice
@@ -146,6 +187,7 @@ function HostPorts({ serverId, label, linkPaths, styles, theme }: HostPortsProps
             action={null}
           />
         ) : null}
+        {noMatch ? <Text style={[styles.meta, styles.centered]}>Nothing matches "{query.trim()}".</Text> : null}
         {groups.workspaces.map((group) => (
           <WorkspaceCard
             key={group.workspace.id}
@@ -215,7 +257,8 @@ function SshLine({
         <View style={[styles.dot, { backgroundColor: color }]} />
         <Text style={styles.text}>{label}</Text>
         <Text style={styles.meta}>
-          {ssh.target} · {ssh.state}
+          {ssh.target}
+          {ssh.auto ? " (auto)" : ""} · {ssh.state}
         </Text>
         <View style={styles.spacer} />
         {activeCount > 0 ? (
@@ -277,7 +320,7 @@ function WorkspaceCard({ group, busy, run, linkPaths, styles, theme }: Workspace
             linkPaths={linkPaths}
             styles={styles}
             theme={theme}
-            idleText={followed ? "connecting…" : "press Forward to open it here"}
+            idleText={followed ? "connecting…" : "stopped · press Forward to open it here"}
             toggle={null}
           />
         ))
@@ -298,6 +341,7 @@ interface PortRowViewProps {
 
 function PortRowView({ entry, linkPaths, styles, theme, idleText, toggle }: PortRowViewProps) {
   const { row, description, forward } = entry;
+  const openInBrowser = useRpc(openUrlRpc);
   const active = forward?.status === "active";
   const dot = !forward
     ? theme.colors.border
@@ -341,7 +385,11 @@ function PortRowView({ entry, linkPaths, styles, theme, idleText, toggle }: Port
         ) : null}
       </View>
       <View style={styles.portActions}>
-        {active ? <SmallButton styles={styles} label="Open ↗" onPress={() => void openExternalUrl(url)} /> : null}
+        {active ? <SmallButton
+            styles={styles}
+            label="Open ↗"
+            onPress={() => void openInBrowser({ url }).catch(() => openExternalUrl(url))}
+          /> : null}
         {toggle ? (
           <SmallButton
             styles={styles}

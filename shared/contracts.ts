@@ -21,8 +21,11 @@ export const RemotePortSchema = z.object({
 export type RemotePort = z.infer<typeof RemotePortSchema>;
 
 export const SshStatusSchema = z.object({
-  state: z.enum(["unmapped", "idle", "connecting", "connected", "error"]),
+  /** `discovering` while the SSH target is being found from the host label and ~/.ssh/config. */
+  state: z.enum(["unmapped", "discovering", "idle", "connecting", "connected", "error"]),
   target: z.string().nullable(),
+  /** True when the target was found automatically rather than set in settings. */
+  auto: z.boolean(),
   error: z.string().nullable(),
   /** serverId read from the remote's paseo.pid, once connected. */
   remoteServerId: z.string().nullable(),
@@ -55,6 +58,8 @@ export const PortsStateSchema = z.object({
 export type PortsState = z.infer<typeof PortsStateSchema>;
 
 const ServerInput = z.object({ serverId: z.string().min(1) });
+/** The host's label in Paseo, the first guess for its SSH target. */
+const HostLabel = z.string().optional();
 const PortInput = ServerInput.extend({ remotePort: z.number().int().min(1).max(65535) });
 const WorkspaceInput = ServerInput.extend({ workspaceId: z.string().min(1) });
 
@@ -67,7 +72,7 @@ export const pingRpc = defineRpc({
 /** The client sends every workspace of the host, so the server can group and prune. */
 export const stateRpc = defineRpc({
   name: "ports.state",
-  input: ServerInput.extend({ workspaces: z.array(WorkspaceRefSchema) }),
+  input: ServerInput.extend({ workspaces: z.array(WorkspaceRefSchema), label: HostLabel }),
   output: PortsStateSchema,
 });
 
@@ -86,10 +91,20 @@ export const unforwardRpc = defineRpc({
 
 export const testConnectionRpc = defineRpc({
   name: "ports.test-connection",
-  input: ServerInput.extend({ target: z.string().min(1).optional() }),
+  /** Without a target: the one in settings, else the one found automatically. */
+  input: ServerInput.extend({ target: z.string().min(1).optional(), label: HostLabel }),
   output: z.object({
     ok: z.boolean(),
+    target: z.string().nullable(),
     remoteServerId: z.string().nullable(),
     error: z.string().nullable(),
   }),
+});
+
+/** Opens a forwarded app in the browser chosen in settings, on this machine. */
+export const openUrlRpc = defineRpc({
+  name: "ports.open-url",
+  /** The server accepts only http(s) links to localhost. */
+  input: z.object({ url: z.string().regex(/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/) }),
+  output: z.object({ opened: z.enum(["chrome", "default"]) }),
 });

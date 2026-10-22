@@ -6,6 +6,7 @@
 import type { Forward, PortRow, PortsState, SshStatus } from "../shared/contracts";
 import { defaultPortSettings, type PortSettings } from "../shared/settings";
 import { matchWorkspace, type WorkspaceRef } from "../shared/workspaces";
+import { candidateTargets, readSshConfig, sshConfigAliases } from "./discover";
 import { ensureLocalPortFree } from "./local-port";
 import { analyzeScan, parseScanOutput, SCAN_SCRIPT } from "./scan";
 import { HostSession } from "./ssh";
@@ -22,6 +23,10 @@ const REAP_EVERY_MS = 15_000;
 const FIRST_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const LOST_CONNECTION = "SSH connection lost; reconnecting";
+/** After a discovery that found nothing, wait this long before trying again. */
+const DISCOVERY_RETRY_MS = 60_000;
+const NOT_FOUND =
+  "No SSH alias reaches this Paseo host. Set its SSH target in Settings → Plugins → Remote ports.";
 /** A followed workspace is dropped only after it is missing from this many lists in a row. */
 const MISSING_LISTS_TO_DROP = 2;
 
@@ -43,6 +48,7 @@ export interface SessionLike {
 export interface ManagerDeps {
   createSession(serverId: string, target: string): SessionLike;
   ensureLocalPortFree(port: number): Promise<void>;
+  readSshConfig(): Promise<string>;
   log(message: string): void;
   setInterval(fn: () => void, ms: number): Timer;
   clearInterval(timer: Timer): void;
@@ -53,6 +59,7 @@ export interface ManagerDeps {
 const defaultDeps: ManagerDeps = {
   createSession: (serverId, target) => new HostSession(serverId, target),
   ensureLocalPortFree: (port) => ensureLocalPortFree(port),
+  readSshConfig: () => readSshConfig(),
   log: (message) => console.log(message),
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (timer) => clearInterval(timer),
@@ -62,12 +69,20 @@ const defaultDeps: ManagerDeps = {
 
 interface HostEntry {
   serverId: string;
+  /** The host's label in Paseo, sent by the client. */
+  label: string | null;
+  /** Target found by discovery, used when settings have none. */
+  autoTarget: string | null;
+  discovering: Promise<void> | null;
+  discoveryFailedAt: number | null;
   session: SessionLike | null;
   ssh: SshStatus;
   ports: PortRow[];
   /** Latest list from the client; null until the first `state` call supplies one. */
   workspaces: WorkspaceRef[] | null;
   followed: Set<string>;
+  /** Workspaces stopped by hand, which automatic forwarding leaves alone. */
+  stopped: Set<string>;
   /** Followed workspace id → consecutive client lists it was missing from. */
   missing: Map<string, number>;
   forwards: Map<number, Forward>;
@@ -99,22 +114,25 @@ export class PortManager {
     const previous = this.settings;
     this.settings = settings;
     for (const entry of this.hosts.values()) {
-      const target = settings.targets[entry.serverId]?.trim() || null;
+      const target = this.targetOf(entry);
       if (target === entry.ssh.target) continue;
       this.deps.log(`[remote-ports] target for ${entry.serverId} changed to ${target ?? "(none)"}`);
       // NOTE: the new target is set before closing, so a refresh in between never reconnects to the old one.
       const state = target ? "idle" : "unmapped";
-      entry.ssh = { ...entry.ssh, target, state, error: null };
+      entry.ssh = { ...entry.ssh, target, auto: target !== null && !this.configuredTarget(entry.serverId), state, error: null };
       void this.closeHost(entry, state);
     }
     if (previous.pollSeconds !== settings.pollSeconds) this.scheduleTick();
   }
 
-  async state(serverId: string, workspaces: WorkspaceRef[]): Promise<PortsState> {
+  async state(serverId: string, workspaces: WorkspaceRef[], label?: string): Promise<PortsState> {
     const entry = this.entry(serverId);
+    if (label) entry.label = label;
     entry.lastState = Date.now();
     entry.workspaces = workspaces;
     await this.pruneArchived(entry);
+    // No target yet: look for one in the background; the client polls and sees it appear.
+    if (!entry.ssh.target) void this.discover(entry);
     if (entry.ssh.target) {
       // The first call waits for a result; later ones answer from the last scan and refresh behind.
       const pending = this.refresh(entry);
@@ -125,6 +143,7 @@ export class PortManager {
 
   async follow(serverId: string, workspaceId: string): Promise<PortsState> {
     const entry = this.entry(serverId);
+    entry.stopped.delete(workspaceId);
     entry.followed.add(workspaceId);
     await this.refresh(entry, true);
     return snapshot(entry);
@@ -132,6 +151,7 @@ export class PortManager {
 
   async unfollow(serverId: string, workspaceId: string): Promise<PortsState> {
     const entry = this.entry(serverId);
+    entry.stopped.add(workspaceId);
     await this.dropWorkspace(entry, workspaceId);
     return snapshot(entry);
   }
@@ -158,10 +178,27 @@ export class PortManager {
   async testConnection(
     serverId: string,
     target?: string,
+    label?: string,
+  ): Promise<{ ok: boolean; target: string | null; remoteServerId: string | null; error: string | null }> {
+    const entry = this.entry(serverId);
+    if (label) entry.label = label;
+    let resolved = target?.trim() || this.targetOf(entry);
+    if (!resolved) {
+      // An explicit test retries right away, even after a recent miss.
+      entry.discoveryFailedAt = null;
+      await this.discover(entry);
+      resolved = entry.autoTarget;
+    }
+    if (!resolved) return { ok: false, target: null, remoteServerId: null, error: NOT_FOUND };
+    return { ...(await this.probe(serverId, resolved)), target: resolved };
+  }
+
+  /** Connects to `target` and checks that it is the Paseo host `serverId`. */
+  private async probe(
+    serverId: string,
+    target: string,
   ): Promise<{ ok: boolean; remoteServerId: string | null; error: string | null }> {
-    const resolved = target?.trim() || this.settings.targets[serverId]?.trim();
-    if (!resolved) return { ok: false, remoteServerId: null, error: "No SSH target configured" };
-    const session = this.deps.createSession(`${serverId}-test`, resolved);
+    const session = this.deps.createSession(`${serverId}-test`, target);
     try {
       await session.start();
       const raw = parseScanOutput(await session.exec(SCAN_SCRIPT));
@@ -222,14 +259,19 @@ export class PortManager {
   private entry(serverId: string): HostEntry {
     let entry = this.hosts.get(serverId);
     if (entry) return entry;
-    const target = this.settings.targets[serverId]?.trim() || null;
+    const target = this.configuredTarget(serverId);
     entry = {
       serverId,
+      label: null,
+      autoTarget: null,
+      discovering: null,
+      discoveryFailedAt: null,
       session: null,
-      ssh: { state: target ? "idle" : "unmapped", target, error: null, remoteServerId: null },
+      ssh: { state: target ? "idle" : "unmapped", target, auto: false, error: null, remoteServerId: null },
       ports: [],
       workspaces: null,
       followed: new Set(),
+      stopped: new Set(),
       missing: new Map(),
       forwards: new Map(),
       scannedAt: null,
@@ -244,6 +286,47 @@ export class PortManager {
     return entry;
   }
 
+  private configuredTarget(serverId: string): string | null {
+    return this.settings.targets[serverId]?.trim() || null;
+  }
+
+  private targetOf(entry: HostEntry): string | null {
+    return this.configuredTarget(entry.serverId) ?? entry.autoTarget;
+  }
+
+  /**
+   * Tries the host label and the ~/.ssh/config aliases in parallel and keeps the first one,
+   * in that order, that reaches a machine whose Paseo serverId is this host's.
+   */
+  private discover(entry: HostEntry): Promise<void> {
+    if (entry.discovering) return entry.discovering;
+    if (entry.discoveryFailedAt !== null && Date.now() - entry.discoveryFailedAt < DISCOVERY_RETRY_MS) {
+      return Promise.resolve();
+    }
+    entry.ssh = { ...entry.ssh, state: "discovering", error: null };
+    const run = async () => {
+      const aliases = sshConfigAliases(await this.deps.readSshConfig());
+      const candidates = candidateTargets(entry.label ?? entry.serverId, aliases);
+      const results = await Promise.all(candidates.map((candidate) => this.probe(entry.serverId, candidate)));
+      const found = candidates.find((_, index) => results[index]?.ok) ?? null;
+      // Settings may have gained a target while probing; that one wins.
+      if (this.configuredTarget(entry.serverId) || this.disposed) return;
+      if (found) {
+        this.deps.log(`[remote-ports] found SSH target ${found} for ${entry.serverId}`);
+        entry.autoTarget = found;
+        entry.discoveryFailedAt = null;
+        entry.ssh = { ...entry.ssh, target: found, auto: true, state: "idle", error: null };
+      } else {
+        entry.discoveryFailedAt = Date.now();
+        entry.ssh = { ...entry.ssh, target: null, auto: false, state: "unmapped", error: NOT_FOUND };
+      }
+    };
+    entry.discovering = run().finally(() => {
+      entry.discovering = null;
+    });
+    return entry.discovering;
+  }
+
   /** Scan, then bring forwards in line with what is followed and what still listens. */
   private async refresh(entry: HostEntry, force = false): Promise<void> {
     await this.scan(entry, force);
@@ -251,6 +334,11 @@ export class PortManager {
     await this.pruneClosed(entry);
     await this.pruneArchived(entry);
     const ignore = new Set(this.settings.ignorePorts);
+    if (this.settings.autoForward) {
+      for (const row of entry.ports) {
+        if (row.workspaceId !== null && !entry.stopped.has(row.workspaceId)) entry.followed.add(row.workspaceId);
+      }
+    }
     for (const row of entry.ports) {
       if (ignore.has(row.port)) continue;
       const followed = row.workspaceId !== null && entry.followed.has(row.workspaceId);
@@ -393,6 +481,7 @@ export class PortManager {
   private async pruneArchived(entry: HostEntry): Promise<void> {
     if (!entry.workspaces) return;
     const known = new Set(entry.workspaces.map((workspace) => workspace.id));
+    for (const id of [...entry.stopped]) if (!known.has(id)) entry.stopped.delete(id);
     for (const id of [...entry.followed]) {
       if (known.has(id)) {
         entry.missing.delete(id);

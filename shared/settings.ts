@@ -14,6 +14,10 @@ export const PortSettingsSchema = z.object({
   /** Scan interval while a workspace is followed or the screen is open, in seconds. */
   pollSeconds: z.number().int().min(1).max(60).default(3),
   ignorePorts: z.array(PortNumber).default(DEFAULT_IGNORE_PORTS),
+  /** Forward every workspace's ports as soon as they listen; Stop opts a workspace out. */
+  autoForward: z.boolean().default(true),
+  /** Where Open links go: Google Chrome, or the system's default browser. */
+  browser: z.enum(["chrome", "default"]).default("chrome"),
   /** Port label → path appended to its Open link (`admin` → `/dashboard`). */
   linkPaths: z.record(z.string(), z.string().regex(/^\//)).default({}),
 });

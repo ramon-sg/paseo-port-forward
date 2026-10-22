@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Forward, PortRow, PortsState } from "../shared/contracts";
-import { groupPorts } from "./groups";
+import { filterGroups, groupPorts } from "./groups";
 import type { RemoteWorkspace } from "./use-remote-ports";
 
 function workspace(id: string, title: string, directory: string): RemoteWorkspace {
@@ -28,7 +28,7 @@ function forward(remotePort: number): Forward {
 
 function state(ports: PortRow[], followed: string[], forwards: Forward[] = []): PortsState {
   return {
-    ssh: { state: "connected", target: "devbox", error: null, remoteServerId: "r" },
+    ssh: { state: "connected", target: "devbox", auto: true, error: null, remoteServerId: "r" },
     ports,
     forwards,
     followed,
@@ -70,5 +70,41 @@ describe("groupPorts", () => {
   it("counts active forwards", () => {
     const result = groupPorts([A], state([port(1, "a", "/wt/a"), port(2, "a", "/wt/a")], ["a"], [forward(1)]));
     expect(result.activeCount).toBe(1);
+  });
+});
+
+describe("filterGroups", () => {
+  const groups = () =>
+    groupPorts(
+      [A, B],
+      state(
+        [port(3000, "a", "/wt/a/apps/api"), port(5173, "a", "/wt/a/apps/web"), port(4000, "b", "/wt/b"), port(6379, null, "/opt")],
+        ["a"],
+      ),
+    );
+
+  it("an empty query keeps everything", () => {
+    expect(filterGroups(groups(), "  ")).toEqual(groups());
+  });
+
+  it("a workspace name keeps all its ports", () => {
+    const result = filterGroups(groups(), "zeta");
+    expect(result.workspaces.map((group) => [group.workspace.id, group.ports.length])).toEqual([["a", 2]]);
+    expect(result.loose).toEqual([]);
+  });
+
+  it("a service name keeps only that port, under its workspace", () => {
+    const result = filterGroups(groups(), "web");
+    expect(result.workspaces.map((group) => group.ports.map((entry) => entry.row.port))).toEqual([[5173]]);
+  });
+
+  it("words combine across workspace and service, case-insensitive", () => {
+    const result = filterGroups(groups(), "ZETA api");
+    expect(result.workspaces.map((group) => group.ports.map((entry) => entry.row.port))).toEqual([[3000]]);
+  });
+
+  it("matches port numbers, branches and loose ports", () => {
+    expect(filterGroups(groups(), "6379").loose.map((entry) => entry.row.port)).toEqual([6379]);
+    expect(filterGroups(groups(), "feat/b").workspaces.map((group) => group.workspace.id)).toEqual(["b"]);
   });
 });

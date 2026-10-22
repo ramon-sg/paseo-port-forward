@@ -1,14 +1,29 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { StyleSheet } from "react-native";
 
-export function makePopoverStyles(theme: PluginTheme, compact: boolean) {
+export function makePopoverStyles(theme: PluginTheme, compact: boolean, windowHeight: number) {
   const { colors } = theme;
+  // The list takes most of the window, leaving room for the header, search and margins.
+  const listHeight = Math.max(280, Math.min(compact ? 640 : 760, windowHeight - (compact ? 240 : 200)));
   return StyleSheet.create({
-    root: { width: compact ? "100%" : 420, maxWidth: "100%", padding: compact ? 16 : 12, gap: 10 },
+    root: { width: compact ? "100%" : 620, maxWidth: "100%", padding: compact ? 16 : 16, gap: 12 },
     header: { flexDirection: "row", alignItems: "center", gap: 8 },
     title: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
-    list: { maxHeight: compact ? 520 : 460 },
-    listContent: { gap: 8 },
+    list: { maxHeight: listHeight },
+    listContent: { gap: 10 },
+    searchRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+    search: {
+      flex: 1,
+      minWidth: 0,
+      color: colors.foreground,
+      fontSize: 13,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderRadius: 8,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
+      backgroundColor: colors.surface1,
+    },
     centered: { paddingVertical: 24, alignItems: "center" },
     stack: { gap: 4 },
     row: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
@@ -20,7 +35,7 @@ export function makePopoverStyles(theme: PluginTheme, compact: boolean) {
     dot: { width: 8, height: 8, borderRadius: 4 },
     card: {
       gap: 8,
-      padding: 10,
+      padding: 12,
       borderRadius: 8,
       borderWidth: StyleSheet.hairlineWidth,
       borderColor: colors.border,

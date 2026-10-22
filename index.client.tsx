@@ -1,12 +1,12 @@
 /**
- * Client side of the plugin: a sidebar item that opens the Remote ports popover, and the
- * plugin's settings screen.
+ * Client side of the plugin: a sidebar item that opens the Remote ports popover (and keeps
+ * automatic forwarding running), and the plugin's settings screen.
  */
-import type { PluginClientContext, PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
-import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import type { PluginClientContext, PluginPopoverProps } from "@getpaseo/plugin/client";
 
 import { PortsPopover } from "./client/ports-popover";
 import { PortSettingsScreen } from "./client/settings-screen";
+import { makeSidebarItem } from "./client/sidebar-item";
 
 const SETTINGS_ID = "remote-ports";
 
@@ -17,9 +17,7 @@ export default function contribute(client: PluginClientContext) {
     return <PortsPopover {...props} openSettings={openSettings} />;
   }
 
-  function PortsSidebarItem({ openPopover }: PluginSidebarItemProps) {
-    return <SidebarRow icon="Cable" onPress={() => openPopover(Popover)} />;
-  }
+  const PortsSidebarItem = makeSidebarItem(Popover);
 
   client.addSidebarHeaderItem({ id: "remote-ports", title: "Remote ports", Component: PortsSidebarItem });
   client.addSettingsScreen({
