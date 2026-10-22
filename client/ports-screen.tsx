@@ -401,7 +401,13 @@ interface PortLineProps {
 
 function PortLine({ label, port, forward, linkPaths, styles, theme, toggle }: PortLineProps) {
   const active = forward?.status === "active";
-  const dot = !forward ? theme.colors.border : active ? theme.colors.statusSuccess : theme.colors.statusDanger;
+  const dot = !forward
+    ? theme.colors.border
+    : active
+      ? theme.colors.statusSuccess
+      : forward.status === "opening"
+        ? theme.colors.statusWarning
+        : theme.colors.statusDanger;
   const url = linkUrl(port.port, label, linkPaths);
   return (
     <View style={styles.stack}>

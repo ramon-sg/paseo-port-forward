@@ -22,6 +22,8 @@ const REAP_EVERY_MS = 15_000;
 const FIRST_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const LOST_CONNECTION = "SSH connection lost; reconnecting";
+/** A followed workspace is dropped only after it is missing from this many lists in a row. */
+const MISSING_LISTS_TO_DROP = 2;
 
 /** Whatever the runtime's timers return (Node and React Native typings disagree). */
 export type Timer = ReturnType<typeof setTimeout>;
@@ -66,6 +68,8 @@ interface HostEntry {
   /** Latest list from the client; null until the first `state` call supplies one. */
   workspaces: WorkspaceRef[] | null;
   followed: Set<string>;
+  /** Followed workspace id → consecutive client lists it was missing from. */
+  missing: Map<string, number>;
   forwards: Map<number, Forward>;
   scannedAt: number | null;
   scanError: string | null;
@@ -98,9 +102,10 @@ export class PortManager {
       const target = settings.targets[entry.serverId]?.trim() || null;
       if (target === entry.ssh.target) continue;
       this.deps.log(`[remote-ports] target for ${entry.serverId} changed to ${target ?? "(none)"}`);
-      void this.closeHost(entry, target === null ? "unmapped" : "idle").then(() => {
-        entry.ssh = { ...entry.ssh, target, state: target ? "idle" : "unmapped", error: null };
-      });
+      // NOTE: the new target is set before closing, so a refresh in between never reconnects to the old one.
+      const state = target ? "idle" : "unmapped";
+      entry.ssh = { ...entry.ssh, target, state, error: null };
+      void this.closeHost(entry, state);
     }
     if (previous.pollSeconds !== settings.pollSeconds) this.scheduleTick();
   }
@@ -193,7 +198,7 @@ export class PortManager {
         const busy = entry.followed.size > 0 || entry.forwards.size > 0;
         if (!busy && now - entry.lastState > SCREEN_OPEN_MS) continue;
         // A dropped master is the reconnect timer's job.
-        if (entry.reconnectTimer) continue;
+        if (entry.reconnectTimer !== null) continue;
         await this.refresh(entry, true);
       }
     } finally {
@@ -225,6 +230,7 @@ export class PortManager {
       ports: [],
       workspaces: null,
       followed: new Set(),
+      missing: new Map(),
       forwards: new Map(),
       scannedAt: null,
       scanError: null,
@@ -259,6 +265,10 @@ export class PortManager {
     if (!target) return Promise.reject(new Error("No SSH target configured for this host"));
     if (entry.session?.running && entry.ssh.state === "connected") return Promise.resolve();
     if (entry.connecting) return entry.connecting;
+    // A pending reconnect owns the next attempt, with its backoff.
+    if (entry.reconnectTimer !== null) return Promise.reject(new Error(`Reconnecting to ${target}…`));
+    const previous = entry.session;
+    if (previous) void previous.stop();
     const session = this.deps.createSession(entry.serverId, target);
     entry.session = session;
     entry.ssh = { ...entry.ssh, state: "connecting", error: null };
@@ -299,7 +309,7 @@ export class PortManager {
   }
 
   private scheduleReconnect(entry: HostEntry): void {
-    if (entry.reconnectTimer || this.disposed) return;
+    if (entry.reconnectTimer !== null || this.disposed) return;
     const delay = entry.backoffMs;
     entry.backoffMs = Math.min(entry.backoffMs * 2, MAX_BACKOFF_MS);
     entry.reconnectTimer = this.deps.setTimeout(() => {
@@ -326,17 +336,28 @@ export class PortManager {
     workspaceId: string | null,
   ): Promise<Forward> {
     const existing = entry.forwards.get(port);
-    if (existing?.status === "active") return existing;
-    const forward: Forward = { remotePort: port, connectHost, status: "active", error: null, workspaceId };
+    if (existing?.status === "active" || existing?.status === "opening") return existing;
+    const forward: Forward = { remotePort: port, connectHost, status: "opening", error: null, workspaceId };
     entry.forwards.set(port, forward);
+    let opened: SessionLike | null = null;
     try {
       await this.deps.ensureLocalPortFree(port);
-      if (!entry.session?.running) throw new Error(LOST_CONNECTION);
-      await entry.session.forward(port, connectHost, port);
-      this.deps.log(`[remote-ports] ${entry.serverId}: localhost:${port} → ${connectHost}:${port}`);
+      const session = entry.session;
+      if (!session?.running) throw new Error(LOST_CONNECTION);
+      await session.forward(port, connectHost, port);
+      opened = session;
     } catch (error) {
       forward.status = "error";
       forward.error = message(error);
+    }
+    if (entry.forwards.get(port) !== forward) {
+      // Stopped while it was opening: undo what ssh just added.
+      await opened?.cancel(port, connectHost, port).catch(() => {});
+      return forward;
+    }
+    if (opened) {
+      forward.status = "active";
+      this.deps.log(`[remote-ports] ${entry.serverId}: localhost:${port} → ${connectHost}:${port}`);
     }
     return forward;
   }
@@ -354,6 +375,7 @@ export class PortManager {
 
   private async dropWorkspace(entry: HostEntry, workspaceId: string): Promise<void> {
     entry.followed.delete(workspaceId);
+    entry.missing.delete(workspaceId);
     for (const forward of [...entry.forwards.values()]) {
       if (forward.workspaceId === workspaceId) await this.cancelForward(entry, forward.remotePort);
     }
@@ -372,7 +394,13 @@ export class PortManager {
     if (!entry.workspaces) return;
     const known = new Set(entry.workspaces.map((workspace) => workspace.id));
     for (const id of [...entry.followed]) {
-      if (!known.has(id)) await this.dropWorkspace(entry, id);
+      if (known.has(id)) {
+        entry.missing.delete(id);
+        continue;
+      }
+      const misses = (entry.missing.get(id) ?? 0) + 1;
+      entry.missing.set(id, misses);
+      if (misses >= MISSING_LISTS_TO_DROP) await this.dropWorkspace(entry, id);
     }
   }
 
@@ -404,6 +432,8 @@ export class PortManager {
         entry.scanError = null;
       } catch (error) {
         entry.scanError = message(error);
+        const unreachable = !entry.session && entry.ssh.state === "error";
+        if (unreachable && (entry.followed.size > 0 || entry.forwards.size > 0)) this.scheduleReconnect(entry);
       } finally {
         entry.scannedAt = Date.now();
         entry.scanning = null;
@@ -434,7 +464,7 @@ export class PortManager {
   }
 
   private async closeHost(entry: HostEntry, state: SshStatus["state"]): Promise<void> {
-    if (entry.reconnectTimer) this.deps.clearTimeout(entry.reconnectTimer);
+    if (entry.reconnectTimer !== null) this.deps.clearTimeout(entry.reconnectTimer);
     entry.reconnectTimer = null;
     for (const port of [...entry.forwards.keys()]) await this.cancelForward(entry, port);
     const session = entry.session;

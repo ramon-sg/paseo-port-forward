@@ -29,12 +29,19 @@ function scanOutput(ports: FakePort[], serverId = SERVER): string {
 
 class FakeSession implements SessionLike {
   running = false;
+  /** Net number of open forwards per port, as ssh would hold them. */
+  open = new Map<number, number>();
+  failStart = false;
   forwards: number[] = [];
   cancels: number[] = [];
   stopped = false;
   private listeners = new Set<(error: string) => void>();
-  constructor(private readonly scan: () => string) {}
+  constructor(
+    private readonly scan: () => string,
+    readonly target: string,
+  ) {}
   async start() {
+    if (this.failStart) throw new Error("ssh: connect to host devbox port 22: Operation timed out");
     this.running = true;
   }
   async exec() {
@@ -43,9 +50,11 @@ class FakeSession implements SessionLike {
   async forward(localPort: number, _host: string, remotePort: number) {
     expect(localPort).toBe(remotePort);
     this.forwards.push(remotePort);
+    this.open.set(remotePort, (this.open.get(remotePort) ?? 0) + 1);
   }
   async cancel(localPort: number) {
     this.cancels.push(localPort);
+    if (this.open.has(localPort)) this.open.set(localPort, (this.open.get(localPort) ?? 0) - 1);
   }
   async stop() {
     this.running = false;
@@ -68,17 +77,21 @@ let remote: FakePort[];
 let remoteServerId: string;
 let sessions: FakeSession[];
 let busyPorts: Set<number>;
+let failStarts: boolean;
+let gate: Promise<void> | null;
 let timeouts: (() => void)[];
 let manager: PortManager;
 
 function deps(): ManagerDeps {
   return {
-    createSession: () => {
-      const session = new FakeSession(() => scanOutput(remote, remoteServerId));
+    createSession: (_serverId, target) => {
+      const session = new FakeSession(() => scanOutput(remote, remoteServerId), target);
+      session.failStart = failStarts;
       sessions.push(session);
       return session;
     },
     ensureLocalPortFree: async (port) => {
+      if (gate) await gate;
       if (busyPorts.has(port)) throw new LocalPortError(port, "node (pid 7)", `port ${port} is in use on this Mac by node (pid 7)`);
     },
     log: () => {},
@@ -104,6 +117,8 @@ beforeEach(() => {
   remoteServerId = SERVER;
   sessions = [];
   busyPorts = new Set();
+  failStarts = false;
+  gate = null;
   timeouts = [];
   manager = new PortManager(deps());
   manager.applySettings({ targets: { [SERVER]: "devbox" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {} });
@@ -175,10 +190,54 @@ describe("PortManager", () => {
   it("followed workspace missing from the next state list is unfollowed and cancelled", async () => {
     await manager.state(SERVER, [WS]);
     await manager.follow(SERVER, WS.id);
+    await manager.state(SERVER, []);
     const state = await manager.state(SERVER, []);
     expect(state.followed).toEqual([]);
     expect(sessions[0]?.cancels).toEqual([20250]);
     expect(state.forwards).toEqual([]);
+  });
+
+  it("one list without the followed workspace does not unfollow it", async () => {
+    await manager.state(SERVER, [WS]);
+    await manager.follow(SERVER, WS.id);
+    const state = await manager.state(SERVER, []);
+    expect(state.followed).toEqual([WS.id]);
+    expect(sessions[0]?.cancels).toEqual([]);
+  });
+
+  it("stop while a forward is still opening leaves nothing open on the master", async () => {
+    let release = () => {};
+    await manager.state(SERVER, [WS]);
+    gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const following = manager.follow(SERVER, WS.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await manager.unfollow(SERVER, WS.id);
+    release();
+    await following;
+    expect(sessions[0]?.open.get(20250) ?? 0).toBe(0);
+    expect((await manager.state(SERVER, [WS])).forwards).toEqual([]);
+  });
+
+  it("changing the target connects to the new one and stops the old master", async () => {
+    await manager.state(SERVER, [WS]);
+    manager.applySettings({ targets: { [SERVER]: "devbox-2" }, pollSeconds: 3, ignorePorts: [22], linkPaths: {} });
+    await manager.state(SERVER, [WS]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessions.map((session) => session.target)).toEqual(["devbox", "devbox-2"]);
+    expect(sessions[0]?.stopped).toBe(true);
+  });
+
+  it("a host that cannot be reached is retried with backoff, not on every tick", async () => {
+    failStarts = true;
+    await manager.state(SERVER, [WS]);
+    await manager.follow(SERVER, WS.id);
+    const attempts = sessions.length;
+    await manager.tick();
+    await manager.tick();
+    expect(sessions.length).toBe(attempts);
+    expect(timeouts.length).toBeGreaterThanOrEqual(1);
   });
 
   it("ports outside any workspace are listed with workspaceId null and are not auto-forwarded", async () => {

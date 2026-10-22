@@ -37,7 +37,8 @@ export type PortRow = z.infer<typeof PortRowSchema>;
 export const ForwardSchema = z.object({
   remotePort: z.number().int(),
   connectHost: z.string(),
-  status: z.enum(["active", "error"]),
+  /** `opening` while the local port is checked and ssh adds the forward. */
+  status: z.enum(["opening", "active", "error"]),
   error: z.string().nullable(),
   workspaceId: z.string().nullable(),
 });
