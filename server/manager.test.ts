@@ -14,7 +14,7 @@ interface FakePort {
 }
 
 /** Raw output of the remote scan script for a supervisor (100) → worker (101) → terminal (102) tree. */
-function scanOutput(ports: FakePort[], serverId = SERVER): string {
+function scanOutput(ports: FakePort[], serverId = SERVER, docker: string[] = []): string {
   const hex = (port: number) => port.toString(16).toUpperCase().padStart(4, "0");
   const lines = ["@pidfile", JSON.stringify({ pid: 100, serverId, listen: "127.0.0.1:6767" }), "@listen"];
   ports.forEach((p, i) => lines.push(`tcp 0100007F:${hex(p.port)} ${9000 + i}`));
@@ -23,7 +23,7 @@ function scanOutput(ports: FakePort[], serverId = SERVER): string {
   lines.push("@owners");
   ports.forEach((p, i) => lines.push(`${p.pid} ${9000 + i}`));
   for (const p of ports) lines.push(`@proc ${p.pid}`, `cwd ${p.cwd}`, "comm node", "cmd node dev");
-  lines.push("@end");
+  lines.push("@docker", ...docker, "@end");
   return lines.join("\n") + "\n";
 }
 
@@ -75,6 +75,7 @@ class FakeSession implements SessionLike {
 
 let remote: FakePort[];
 let remoteServerId: string;
+let remoteDocker: string[];
 let sessions: FakeSession[];
 let busyPorts: Set<number>;
 let failStarts: boolean;
@@ -85,7 +86,7 @@ let manager: PortManager;
 function deps(): ManagerDeps {
   return {
     createSession: (_serverId, target) => {
-      const session = new FakeSession(() => scanOutput(remote, remoteServerId), target);
+      const session = new FakeSession(() => scanOutput(remote, remoteServerId, remoteDocker), target);
       session.failStart = failStarts;
       sessions.push(session);
       return session;
@@ -115,6 +116,7 @@ const forwarded = (state: { forwards: { remotePort: number; status: string }[] }
 beforeEach(() => {
   remote = [api, ssh];
   remoteServerId = SERVER;
+  remoteDocker = [];
   sessions = [];
   busyPorts = new Set();
   failStarts = false;
@@ -238,6 +240,14 @@ describe("PortManager", () => {
     await manager.tick();
     expect(sessions.length).toBe(attempts);
     expect(timeouts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("docker compose ports of a followed workspace are forwarded too", async () => {
+    remoteDocker = [`0.0.0.0:20254->9000/tcp\t${WS.directory}\trustfs`];
+    await manager.state(SERVER, [WS]);
+    const state = await manager.follow(SERVER, WS.id);
+    expect(forwarded(state)).toEqual([20250, 20254]);
+    expect(state.ports.find((p) => p.port === 20254)).toMatchObject({ process: "rustfs", workspaceId: WS.id });
   });
 
   it("ports outside any workspace are listed with workspaceId null and are not auto-forwarded", async () => {

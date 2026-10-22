@@ -40,10 +40,15 @@ Settings → Plugins → **Remote ports**:
 
 - **Connection:** one OpenSSH ControlMaster per remote host, with your keys, agent and
   `~/.ssh/config`, and `BatchMode=yes`.
-- **Detection:** a read-only script over that connection reads `/proc/net/tcp{,6}`. It
-  keeps the sockets owned by processes that descend from the remote Paseo daemon (agents,
-  terminals and services). Docker-published ports are not Paseo descendants and are
-  skipped.
+- **Detection:** a read-only script over that connection reads `/proc/net/tcp{,6}` and
+  `docker ps`. It keeps:
+  - sockets owned by processes that descend from the remote Paseo daemon (agents, terminals
+    and services);
+  - sockets of processes started outside Paseo (an ssh shell, tmux) whose working directory
+    is inside a workspace;
+  - ports that Docker Compose publishes for a project whose working directory is inside a
+    workspace (named after the compose service, e.g. `rustfs`). Containers from other
+    folders are skipped.
 - **Grouping:** the popover lists the remote host's workspaces through Paseo, each with its
   project, branch and ports. Each port belongs to the workspace whose directory contains
   its process's working directory.

@@ -415,7 +415,8 @@ export class PortManager {
         if (!session) throw new Error(LOST_CONNECTION);
         const raw = parseScanOutput(await session.exec(SCAN_SCRIPT));
         if (!raw.complete) throw new Error("Port scan output was truncated");
-        const result = analyzeScan(raw);
+        const dirs = (entry.workspaces ?? []).map((workspace) => workspace.directory);
+        const result = analyzeScan(raw, dirs);
         entry.ssh = { ...entry.ssh, remoteServerId: result.pidFile?.serverId ?? null };
         if (!result.pidFile) {
           throw new Error("No Paseo daemon found on the remote (~/.paseo/paseo.pid is missing)");

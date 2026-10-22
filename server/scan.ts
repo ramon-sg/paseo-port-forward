@@ -4,6 +4,7 @@
  * `analyzeScan` on this side, where it can be unit-tested.
  */
 import type { RemotePort } from "../shared/contracts";
+import { containsPath } from "../shared/workspaces";
 
 export const SCAN_SCRIPT = String.raw`
 PH="$PASEO_HOME"
@@ -50,6 +51,10 @@ for pid in $(printf '%s\n%s\n' "$(echo "$OWNERS" | awk '{print $1}')" "$ROOTS" |
   printf 'cmd '; tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-400; echo
   tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -E '^PASEO_AGENT_(ID|CWD)=' | sed 's/^/env /'
 done
+echo "@docker"
+if command -v docker >/dev/null 2>&1; then
+  docker ps --format '{{.Ports}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.service"}}' 2>/dev/null
+fi
 echo "@end"
 `;
 
@@ -73,8 +78,16 @@ interface ProcInfo {
   env: Record<string, string>;
 }
 
+/** One running container, from `docker ps`: its published ports and compose labels. */
+interface DockerRow {
+  ports: string;
+  workdir: string;
+  service: string;
+}
+
 export interface RawScan {
   pidFile: PidFile | null;
+  docker: DockerRow[];
   listen: ListenSocket[];
   parents: Map<number, number>;
   owners: Map<string, number[]>;
@@ -165,6 +178,7 @@ export function connectHostFor(address: string): string {
 export function parseScanOutput(output: string): RawScan {
   const raw: RawScan = {
     pidFile: null,
+    docker: [],
     listen: [],
     parents: new Map(),
     owners: new Map(),
@@ -186,7 +200,10 @@ export function parseScanOutput(output: string): RawScan {
       }
       continue;
     }
-    if (section === "pidfile") {
+    if (section === "docker") {
+      const [ports = "", workdir = "", service = ""] = line.split("\t");
+      if (ports.trim()) raw.docker.push({ ports: ports.trim(), workdir: workdir.trim(), service: service.trim() });
+    } else if (section === "pidfile") {
       pidFileText += line + "\n";
     } else if (section === "listen") {
       const [family, local, inode] = line.trim().split(/\s+/);
@@ -242,12 +259,34 @@ function isPaseoInternal(cmd: string): boolean {
   return cmd.includes("/@getpaseo/") || cmd.includes("plugin-process");
 }
 
+/** Docker's `Ports` column → published TCP host ports, ranges expanded (`0.0.0.0:8000-8001->…`). */
+export function parseDockerPorts(text: string): { bind: string; port: number }[] {
+  const result: { bind: string; port: number }[] = [];
+  for (const entry of text.split(",")) {
+    const match = entry.trim().match(/^(?:\[([^\]]+)\]|([^:]+)):(\d+)(?:-(\d+))?->[^/]+\/tcp$/);
+    if (!match) continue;
+    const bind = match[1] ?? match[2] ?? "0.0.0.0";
+    const first = Number(match[3]);
+    const last = match[4] ? Math.min(Number(match[4]), first + MAX_DOCKER_RANGE) : first;
+    for (let port = first; port <= last; port++) result.push({ bind, port });
+  }
+  return result;
+}
+
+/** Ports of a published range beyond this are not listed. */
+const MAX_DOCKER_RANGE = 20;
+
+const inside = (cwd: string | null, dirs: readonly string[]) =>
+  !!cwd && dirs.some((dir) => dir && containsPath(dir, cwd));
+
 /**
  * Keep listening sockets owned by processes that descend from the Paseo supervisor,
  * excluding the supervisor, the daemon worker, the daemon's listen port, and anything
- * running under one of the daemon's plugin-host processes.
+ * running under one of the daemon's plugin-host processes. With `workspaceDirs`, also keep
+ * processes started outside Paseo (an ssh shell, tmux) whose cwd is inside a workspace, and
+ * the ports Docker Compose publishes for a project whose working dir is inside a workspace.
  */
-export function analyzeScan(raw: RawScan): ScanResult {
+export function analyzeScan(raw: RawScan, workspaceDirs: readonly string[] = []): ScanResult {
   const supervisor = raw.pidFile?.pid;
   if (supervisor === undefined) return { pidFile: raw.pidFile, ports: [] };
   const daemonPort = listenPort(raw.pidFile?.listen ?? null);
@@ -258,13 +297,18 @@ export function analyzeScan(raw: RawScan): ScanResult {
     for (const pid of raw.owners.get(socket.inode) ?? []) {
       const chain = ancestors(pid, raw.parents);
       const depth = chain.indexOf(supervisor);
-      // depth 0: the parent is the supervisor, so `pid` is the daemon worker itself.
-      if (pid === supervisor || depth < 1) continue;
-      const branchRoot = chain[depth - 2] ?? pid;
       const info = raw.procs.get(pid);
-      const rootInfo = raw.procs.get(branchRoot);
+      if (pid === supervisor) continue;
+      if (depth < 0) {
+        // Outside Paseo: only when it runs inside a workspace.
+        if (!inside(info?.cwd ?? null, workspaceDirs)) continue;
+      } else {
+        // depth 0: the parent is the supervisor, so `pid` is the daemon worker itself.
+        if (depth < 1) continue;
+        const rootInfo = raw.procs.get(chain[depth - 2] ?? pid);
+        if (rootInfo?.cmd.includes("plugin-process")) continue;
+      }
       if (info && isPaseoInternal(info.cmd)) continue;
-      if (rootInfo?.cmd.includes("plugin-process")) continue;
 
       const existing = byPort.get(socket.port);
       if (existing && (existing.family === "tcp" || socket.family === "tcp6")) continue;
@@ -278,6 +322,25 @@ export function analyzeScan(raw: RawScan): ScanResult {
         command: info?.cmd ?? "",
         agentId: info?.env.PASEO_AGENT_ID || null,
         cwd: info?.env.PASEO_AGENT_CWD || info?.cwd || null,
+      });
+    }
+  }
+
+  for (const container of raw.docker) {
+    if (!inside(container.workdir, workspaceDirs)) continue;
+    for (const { bind, port } of parseDockerPorts(container.ports)) {
+      if (port === daemonPort || byPort.has(port)) continue;
+      const service = container.service || "docker";
+      byPort.set(port, {
+        family: bind.includes(":") ? "tcp6" : "tcp",
+        port,
+        bind,
+        connectHost: connectHostFor(bind),
+        pid: 0,
+        process: service,
+        command: `docker compose service ${service}`,
+        agentId: null,
+        cwd: container.workdir,
       });
     }
   }
