@@ -23,6 +23,9 @@ const FIRST_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const LOST_CONNECTION = "SSH connection lost; reconnecting";
 
+/** Whatever the runtime's timers return (Node and React Native typings disagree). */
+export type Timer = ReturnType<typeof setTimeout>;
+
 /** The part of `HostSession` the manager uses, so tests can drive it without ssh. */
 export interface SessionLike {
   readonly running: boolean;
@@ -39,10 +42,10 @@ export interface ManagerDeps {
   createSession(serverId: string, target: string): SessionLike;
   ensureLocalPortFree(port: number): Promise<void>;
   log(message: string): void;
-  setInterval(fn: () => void, ms: number): NodeJS.Timeout;
-  clearInterval(timer: NodeJS.Timeout): void;
-  setTimeout(fn: () => void, ms: number): NodeJS.Timeout;
-  clearTimeout(timer: NodeJS.Timeout): void;
+  setInterval(fn: () => void, ms: number): Timer;
+  clearInterval(timer: Timer): void;
+  setTimeout(fn: () => void, ms: number): Timer;
+  clearTimeout(timer: Timer): void;
 }
 
 const defaultDeps: ManagerDeps = {
@@ -70,15 +73,15 @@ interface HostEntry {
   connecting: Promise<void> | null;
   lastState: number;
   backoffMs: number;
-  reconnectTimer: NodeJS.Timeout | null;
+  reconnectTimer: Timer | null;
 }
 
 export class PortManager {
   private readonly deps: ManagerDeps;
   private hosts = new Map<string, HostEntry>();
   private settings: PortSettings = defaultPortSettings();
-  private reapTimer: NodeJS.Timeout;
-  private tickTimer: NodeJS.Timeout | null = null;
+  private reapTimer: Timer;
+  private tickTimer: Timer | null = null;
   private disposed = false;
   private ticking = false;
 

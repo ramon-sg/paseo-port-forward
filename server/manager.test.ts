@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { LocalPortError } from "./local-port";
-import { PortManager, type ManagerDeps, type SessionLike } from "./manager";
+import { PortManager, type ManagerDeps, type SessionLike, type Timer } from "./manager";
 
 const SERVER = "srv-devbox";
 const WS = { id: "ws-1", directory: "/home/r/wt/abastio-1" };
@@ -82,11 +82,11 @@ function deps(): ManagerDeps {
       if (busyPorts.has(port)) throw new LocalPortError(port, "node (pid 7)", `port ${port} is in use on this Mac by node (pid 7)`);
     },
     log: () => {},
-    setInterval: () => 0 as unknown as NodeJS.Timeout,
+    setInterval: () => 0 as unknown as Timer,
     clearInterval: () => {},
     setTimeout: (fn) => {
       timeouts.push(fn);
-      return 0 as unknown as NodeJS.Timeout;
+      return 0 as unknown as Timer;
     },
     clearTimeout: () => {},
   };

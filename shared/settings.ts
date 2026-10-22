@@ -39,3 +39,22 @@ export function parsePortList(text: string): number[] {
     .filter((port) => Number.isInteger(port) && port >= 1 && port <= 65535);
   return [...new Set(ports)].sort((a, b) => a - b);
 }
+
+/** "admin=/dashboard, vendor=/seller" (commas or new lines) → { admin: "/dashboard" }; lines without a label or a leading slash are dropped. */
+export function parseLinkPaths(text: string): Record<string, string> {
+  const paths: Record<string, string> = {};
+  for (const line of text.split(/[\n,]/)) {
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const label = line.slice(0, eq).trim();
+    const path = line.slice(eq + 1).trim();
+    if (label && path.startsWith("/")) paths[label] = path;
+  }
+  return paths;
+}
+
+export function formatLinkPaths(paths: Readonly<Record<string, string>>): string {
+  return Object.entries(paths)
+    .map(([label, path]) => `${label}=${path}`)
+    .join(", ");
+}
