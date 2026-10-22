@@ -1,41 +1,41 @@
 /**
- * Client side of the plugin: the Remote ports screen, its sidebar item and settings.
+ * Client side of the plugin: a sidebar item that opens the Remote ports popover, and the
+ * plugin's settings screen.
  */
-import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginPopoverProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 
-import { PortsScreen } from "./client/ports-screen";
+import { PortsPopover } from "./client/ports-popover";
 import { PortSettingsScreen } from "./client/settings-screen";
 
-const SCREEN_ID = "remote-ports";
-
-function PortsSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
-  return (
-    <SidebarRow
-      icon="Cable"
-      active={currentScreen?.screenId === SCREEN_ID}
-      onPress={() => openScreen({ screenId: SCREEN_ID })}
-    />
-  );
-}
+const SETTINGS_ID = "remote-ports";
 
 export default function contribute(client: PluginClientContext) {
-  client.addScreen({ id: SCREEN_ID, title: "Remote ports", Component: PortsScreen });
-  client.addSidebarHeaderItem({ id: SCREEN_ID, title: "Remote ports", Component: PortsSidebarItem });
+  const openSettings = () => client.openSettings(SETTINGS_ID);
+
+  function Popover(props: PluginPopoverProps) {
+    return <PortsPopover {...props} openSettings={openSettings} />;
+  }
+
+  function PortsSidebarItem({ openPopover }: PluginSidebarItemProps) {
+    return <SidebarRow icon="Cable" onPress={() => openPopover(Popover)} />;
+  }
+
+  client.addSidebarHeaderItem({ id: "remote-ports", title: "Remote ports", Component: PortsSidebarItem });
   client.addSettingsScreen({
-    id: SCREEN_ID,
+    id: SETTINGS_ID,
     title: "Remote ports",
     icon: "Cable",
     Component: PortSettingsScreen,
   });
   client.addCommandCenterItem({
-    id: "open-remote-ports",
-    title: "Open Remote ports",
+    id: "open-remote-ports-settings",
+    title: "Remote ports settings",
     icon: "Cable",
     keywords: ["ports", "forward", "ssh", "localhost", "tunnel", "remote"],
     context: "global",
     onSelect(context) {
-      context.openScreen({ screenId: SCREEN_ID });
+      context.openSettings(SETTINGS_ID);
     },
   });
   return () => {};

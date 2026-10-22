@@ -1,0 +1,82 @@
+import type { PluginTheme } from "@getpaseo/plugin";
+import { StyleSheet } from "react-native";
+
+export function makePopoverStyles(theme: PluginTheme, compact: boolean) {
+  const { colors } = theme;
+  return StyleSheet.create({
+    root: { width: compact ? "100%" : 420, maxWidth: "100%", padding: compact ? 16 : 12, gap: 10 },
+    header: { flexDirection: "row", alignItems: "center", gap: 8 },
+    title: { color: colors.foreground, fontSize: 15, fontWeight: "600" },
+    list: { maxHeight: compact ? 520 : 460 },
+    listContent: { gap: 8 },
+    centered: { paddingVertical: 24, alignItems: "center" },
+    stack: { gap: 4 },
+    row: { flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 },
+    spacer: { flexGrow: 1 },
+    text: { color: colors.foreground, fontSize: 13, fontWeight: "500" },
+    meta: { color: colors.foregroundMuted, fontSize: 12 },
+    ok: { color: colors.statusSuccess, fontSize: 12, fontVariant: ["tabular-nums"] },
+    danger: { color: colors.statusDanger, fontSize: 12 },
+    dot: { width: 8, height: 8, borderRadius: 4 },
+    card: {
+      gap: 8,
+      padding: 10,
+      borderRadius: 8,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
+      backgroundColor: colors.surface1,
+    },
+    cardFollowed: { borderColor: colors.accent },
+    cardHeader: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+    cardTitles: { flex: 1, minWidth: 0, gap: 2 },
+    eyebrow: {
+      color: colors.foregroundMuted,
+      fontSize: 10,
+      fontWeight: "600",
+      letterSpacing: 0.6,
+      textTransform: "uppercase",
+    },
+    cardTitle: { color: colors.foreground, fontSize: 14, fontWeight: "600" },
+    branch: { color: colors.foregroundMuted, fontSize: 12, flexShrink: 1 },
+    tag: {
+      color: colors.foregroundMuted,
+      fontSize: 10,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+      borderRadius: 4,
+      overflow: "hidden",
+      backgroundColor: colors.surface2,
+    },
+    portRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 8,
+      paddingTop: 8,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: colors.border,
+    },
+    portDot: { marginTop: 5 },
+    portBody: { flex: 1, minWidth: 0, gap: 2 },
+    portName: { color: colors.foreground, fontSize: 13, fontWeight: "600", flexShrink: 1 },
+    portNumber: { color: colors.foreground, fontSize: 13, fontVariant: ["tabular-nums"] },
+    portActions: { flexDirection: "row", gap: 6, alignItems: "center" },
+    chips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+    chip: {
+      paddingHorizontal: 10,
+      paddingVertical: 3,
+      borderRadius: 999,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: colors.border,
+    },
+    chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+    chipText: { color: colors.foreground, fontSize: 12 },
+    chipTextActive: { color: colors.accentForeground, fontSize: 12 },
+    button: { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 6, backgroundColor: colors.surface2 },
+    buttonPrimary: { backgroundColor: colors.accent },
+    buttonDisabled: { opacity: 0.5 },
+    buttonText: { color: colors.foreground, fontSize: 12 },
+    buttonPrimaryText: { color: colors.accentForeground, fontSize: 12, fontWeight: "500" },
+  });
+}
+
+export type PopoverStyles = ReturnType<typeof makePopoverStyles>;

@@ -1,11 +1,14 @@
 /**
- * Settings: SSH target per remote host, ignored ports, scan interval and Open link paths.
+ * Settings: SSH target per remote host (with a connection test), ignored ports, scan
+ * interval and Open link paths.
  */
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { useHosts } from "@getpaseo/plugin/client";
-import { SettingsInput, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { useHosts, useRpc } from "@getpaseo/plugin/client";
+import { SettingsAction, SettingsInput, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { useMutation } from "@tanstack/react-query";
 import { ScrollView, Text } from "react-native";
 
+import { testConnectionRpc } from "../shared/contracts";
 import { formatLinkPaths, parseLinkPaths, parsePortList } from "../shared/settings";
 import { usePortSettings } from "./use-port-settings";
 
@@ -24,17 +27,20 @@ export function PortSettingsScreen({ host, theme }: PluginSurfaceProps) {
   return (
     <ScrollView automaticallyAdjustKeyboardInsets>
       <SettingsSection title="SSH targets">
+        <Text style={{ color: theme.colors.foregroundMuted }}>
+          Forwarding uses your own SSH (keys, agent and ~/.ssh/config). Enter user@host or an alias
+          from ~/.ssh/config. Password prompts are not supported.
+        </Text>
         {remotes.length === 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted }}>No remote hosts configured.</Text>
         ) : null}
         {remotes.map((remote) => (
-          <SettingsInput
+          <TargetRow
             key={remote.serverId}
+            serverId={remote.serverId}
             label={remote.label}
-            hint={`user@host or a ~/.ssh/config alias for ${remote.serverId}`}
-            initialValue={values.targets[remote.serverId] ?? ""}
-            placeholder="not forwarded"
-            onChangeText={(text) => void setTarget(remote.serverId, text)}
+            target={values.targets[remote.serverId] ?? ""}
+            onChange={(text) => void setTarget(remote.serverId, text)}
           />
         ))}
       </SettingsSection>
@@ -65,5 +71,43 @@ export function PortSettingsScreen({ host, theme }: PluginSurfaceProps) {
         />
       </SettingsSection>
     </ScrollView>
+  );
+}
+
+function TargetRow({
+  serverId,
+  label,
+  target,
+  onChange,
+}: {
+  serverId: string;
+  label: string;
+  target: string;
+  onChange(text: string): void;
+}) {
+  const test = useMutation({ mutationFn: useRpc(testConnectionRpc) });
+  const result = test.data;
+  const testError = test.error ? String(test.error) : result && !result.ok ? result.error : null;
+  return (
+    <>
+      <SettingsInput
+        label={label}
+        hint={`user@host or a ~/.ssh/config alias for ${serverId}`}
+        initialValue={target}
+        placeholder="not forwarded"
+        onChangeText={(text) => {
+          test.reset();
+          onChange(text);
+        }}
+      />
+      <SettingsAction
+        label={`Test ${label}`}
+        hint={result?.ok ? `Verified: this is Paseo host ${result.remoteServerId}` : "Checks that the target reaches this Paseo host."}
+        error={testError}
+        actionLabel={test.isPending ? "Testing…" : "Test connection"}
+        disabled={!target.trim() || test.isPending}
+        onPress={() => test.mutate({ serverId, target: target.trim() })}
+      />
+    </>
   );
 }
