@@ -1,0 +1,9 @@
+{
+  "id": "remote-ports",
+  "name": "Remote ports",
+  "description": "Forward a remote workspace's dev ports to this machine's localhost, at the same port numbers, over your own SSH connection.",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.11.2"
+  }
+}
